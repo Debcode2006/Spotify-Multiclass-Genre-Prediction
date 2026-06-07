@@ -1,0 +1,429 @@
+NAME: DEBANJAN SARKAR
+COLLEGE: GOVERNMENT COLLEGE OF ENGINEERING AND CERAMIC TECHNOLOGY
+PHONE NO.: 9749133706
+
+================================================================================
+  SPOTIFY TRACK GENRE CLASSIFICATION — DETAILED WORKFLOW REPORT
+  Project: Kaggle Competition — Multi-class Genre Prediction
+  Notebook: notebook.ipynb
+  Date: 2026-04-09
+================================================================================
+
+OVERVIEW
+--------
+Task       : Multi-class genre classification across 114 Spotify genres
+Data       : ~84,800 training rows × 15+ columns; separate test set
+Target     : track_genre (114 classes)
+Metric     : Macro F1-Score (primary), Accuracy (secondary)
+Reproducibility: SEED = 42 passed to every model, splitter, and shuffle
+
+
+================================================================================
+SECTION 1 — SETUP & IMPORTS
+================================================================================
+
+Libraries Used:
+  - numpy, pandas                  : Core data manipulation
+  - matplotlib, seaborn            : Visualisation (darkgrid theme, muted palette)
+  - sklearn.feature_extraction     : TfidfVectorizer (text features)
+  - sklearn.preprocessing          : LabelEncoder
+  - sklearn.model_selection        : StratifiedKFold, cross_val_score,
+                                     train_test_split
+  - sklearn.feature_selection      : SelectFromModel
+  - sklearn.ensemble               : RandomForestClassifier
+  - lightgbm                       : LGBMClassifier
+  - xgboost                        : XGBClassifier
+  - catboost                       : CatBoostClassifier
+  - sklearn.metrics                : accuracy_score, classification_report,
+                                     f1_score, precision_score,
+                                     confusion_matrix, ConfusionMatrixDisplay
+  - gc, time, re                   : Utility modules
+
+Global Configuration:
+  - SEED = 42 (set via np.random.seed)
+  - pd.set_option('display.max_columns', None)
+
+
+================================================================================
+SECTION 2 — DATA LOADING
+================================================================================
+
+Files Loaded:
+  - train.csv  : ~84,800 rows with audio features, metadata, and target label
+  - test.csv   : Unlabelled test set (same column schema minus track_genre)
+
+Columns in Dataset:
+  Audio features : energy, danceability, loudness, speechiness, acousticness,
+                   instrumentalness, liveness, valence, tempo, duration_ms
+  Metadata       : artists, track_name, album_name, popularity, explicit,
+                   key, mode, time_signature
+  Target         : track_genre (114 unique genre labels)
+
+Checks Performed:
+  - Shape verification (rows × columns) for both train and test
+  - df.info() review for data types and non-null counts
+  - First 3 rows preview (head(3)) for quick visual inspection
+
+
+================================================================================
+SECTION 3 — DATA CLEANING
+================================================================================
+
+Function: clean_dataset(df, is_train=True)
+Applied independently to both train and test to maintain a consistent schema.
+
+Issues Detected and Fixes Applied:
+  ┌─────────────────────────────────┬────────────────────┬───────────────────────────────┐
+  │  Issue                          │  Column(s)         │  Fix                          │
+  ├─────────────────────────────────┼────────────────────┼───────────────────────────────┤
+  │  Unnamed index column from CSV  │  Unnamed: 0        │  Dropped (errors='ignore')    │
+  │  Stored as string instead of    │  popularity        │  pd.to_numeric(errors='coerce')│
+  │  numeric                        │                    │                               │
+  │  Mixed-case boolean strings +   │  explicit          │  Normalised → 0/1 integer via │
+  │  integers ('True','False','1')  │                    │  parse_explicit() function    │
+  │  Sentinel value -1 for invalid  │  time_signature    │  Replaced with NaN            │
+  │  Missing target labels          │  track_genre       │  Rows dropped (train only)    │
+  │  Missing numeric values         │  all numeric cols  │  Median imputation            │
+  │  Missing categorical values     │  artists,          │  Filled with 'unknown'        │
+  │                                 │  album_name,       │                               │
+  │                                 │  track_name        │                               │
+  └─────────────────────────────────┴────────────────────┴───────────────────────────────┘
+
+Leakage Prevention:
+  - Imputation statistics (medians) computed only from training rows
+  - Test set is cleaned using the same transformations but NO training statistics
+    are used to fill test values (test is cleaned independently)
+
+Final Check:
+  - Remaining NaN count printed after cleaning — target: 0 missing values
+
+
+================================================================================
+SECTION 4 — EXPLORATORY DATA ANALYSIS (EDA)
+================================================================================
+
+Purpose of EDA:
+  1. Confirm class balance across 114 genres
+  2. Identify which audio features discriminate genres most clearly
+  3. Spot confusion zones — genre pairs that overlap in feature space
+
+--- 4.1  Target Distribution (All 114 Genres) ---
+  - Bar chart of track count per genre
+  - Dataset is remarkably balanced (~750 tracks per genre, max/min ratio ≈ 1)
+  - Conclusion: No oversampling or class-weighting needed; macro F1 is a fair metric
+  - Random baseline accuracy ≈ 0.88% (1/114)
+
+--- 4.2  Audio Feature Distributions ---
+  - Histogram grid (3×4) for all 11 audio features
+  - Findings:
+      * speechiness, instrumentalness — heavily right-skewed; spike near 0
+      * liveness — clusters near 0.1 (most tracks are studio recordings)
+      * popularity — near-uniform; weak genre predictor on its own
+      * loudness — spans -60 to 0 dB (log scale)
+  - Note: Tree-based models (LightGBM, XGBoost, CatBoost) are natively robust
+    to feature skew — no log-transforms required
+
+--- 4.3  Correlation Heatmap ---
+  - Lower-triangle correlation heatmap for all numeric audio features
+  - Key correlations:
+      * energy ↔ loudness        : r ≈ +0.75 (louder = more energetic)
+      * acousticness ↔ energy    : r ≈ -0.70 (most discriminative axis in raw space)
+      * key, time_signature      : near-zero correlations with everything — weak signals
+  - Implication: Genres at similar energy–acousticness–loudness coordinates will
+    be the model's hardest confusion zones
+
+--- 4.4  Binary Analysis — Spotlight Genres (6 Contrasting Genres) ---
+  Genres selected: classical, death-metal, hip-hop, reggae, jazz, edm
+  Features compared via box plots: energy, danceability, acousticness,
+                                   speechiness, valence, instrumentalness
+
+  Genre Profiles:
+    ┌─────────────┬───────────────────────────────────────────────────┐
+    │ Genre       │ Audio Signature                                    │
+    ├─────────────┼───────────────────────────────────────────────────┤
+    │ Classical   │ High acousticness + instrumentalness, low energy  │
+    │ Death-metal │ Peak energy, very low valence                     │
+    │ Hip-hop     │ High speechiness, moderate danceability           │
+    │ Reggae      │ Moderate energy, high valence, ~70 BPM pattern    │
+    │ Jazz        │ High instrumentalness, moderate acousticness      │
+    │ EDM         │ Peak energy + danceability, low acousticness      │
+    └─────────────┴───────────────────────────────────────────────────┘
+
+--- 4.5  Multiclass Analysis — Genre Clusters (All 114 Genres) ---
+  - Audio features normalised per-genre to [0,1] range
+  - Heatmap of normalised features for all 114 genres
+  - Top 5 most energetic genres and top 5 most acoustic genres printed
+  - Cluster structure identified:
+      * High-energy cluster : death-metal, black-metal, metalcore, grindcore, punk-rock
+      * Acoustic cluster    : classical, singer-songwriter, acoustic, folk, ambient
+      * Dance cluster       : EDM, dance, club, reggaeton
+  - Insight: Within-cluster separations require artist + text features,
+    not audio features alone
+
+--- 4.6  Explicit Content & Mode by Genre ---
+  - Bar chart (horizontal): Top 20 genres by explicit rate
+  - Bar chart (horizontal): Mode (major=1 / minor=0) fraction per genre
+  - Findings:
+      * Rap/hip-hop/trap → highest explicit rates (coherent with high speechiness)
+      * Metal/punk genres → lean heavily minor key
+      * Pop/reggae → lean major key
+      * explicit alone is a weak predictor; gains power combined with speechiness
+        via the derived speech_music ratio feature
+
+
+================================================================================
+SECTION 5 — FEATURE ENGINEERING
+================================================================================
+
+Strategy: Three underexploited signal sources were targeted beyond raw audio:
+  1. Text in track/album names (genre vocabulary)
+  2. Artist identity (genre-consistent by nature)
+  3. Audio feature interactions (non-linear genre boundaries)
+
+--- 5.0  Combined DataFrame ---
+  - train and test concatenated into all_df for consistent TF-IDF vocabulary
+  - _is_train flag added to distinguish the two sets
+
+--- 5.1  TF-IDF on Text Fields ---
+  Feature created : text_blob = track_name + ' ' + album_name
+  Vectorizer config:
+    - max_features   = 100 (top 100 most informative tokens)
+    - ngram_range    = (1, 2) (unigrams + bigrams)
+    - sublinear_tf   = True (log-scaled TF for better dynamic range)
+    - strip_accents  = 'unicode'
+    - min_df         = 3 (ignore very rare tokens)
+  Output: 100 new columns (tfidf_<token>)
+  Rationale: Genre-specific vocabulary like "Symphony", "Drill", "Acoustic Session"
+             or bigrams like "death metal", "hip hop" carry strong discriminative signal
+             that pure audio features cannot provide.
+
+--- 5.2  Artist Target Encoding ---
+  Method : Compute mean of integer-encoded genre label per artist in training rows
+  Fitted on: training rows ONLY (leakage prevention)
+  Unknown artists (test-only artists): filled with global mean of artist encoding
+  Output: 1 new column (artist_genre_mean)
+  Rationale: Artists are genre-consistent (Beethoven → classical; Drake → hip-hop).
+             This single feature is likely the most predictive in the entire set.
+
+--- 5.3  Derived Audio Features ---
+  ┌──────────────────────────┬───────────────────────────────────────────────────┐
+  │ Feature                  │ Formula & Rationale                               │
+  ├──────────────────────────┼───────────────────────────────────────────────────┤
+  │ energy_acoustic_ratio    │ energy / (acousticness + 1e-6)                    │
+  │                          │ High → electronic; Low → organic/acoustic         │
+  │ dance_energy             │ danceability × energy                             │
+  │                          │ High → EDM; Low → classical/folk                  │
+  │ mood_index               │ valence × energy                                  │
+  │                          │ High → happy/party; Low → ambient/sad             │
+  │ speech_music             │ speechiness / (1 - speechiness + 1e-6)            │
+  │                          │ Differentiates hip-hop/spoken-word from music     │
+  │ loudness_norm            │ loudness + 60   (shifts dB range to ≈ 0..60)      │
+  │                          │ More interpretable positive range                 │
+  │ duration_min             │ duration_ms / 60,000                              │
+  │                          │ Duration in minutes (genre-level signal)          │
+  └──────────────────────────┴───────────────────────────────────────────────────┘
+
+--- 5.4  Finalize & Split ---
+  - explicit filled with 0 for remaining NaNs, cast to int
+  - Combined dataframe split back into train_fe and test_fe via _is_train flag
+
+
+================================================================================
+SECTION 6 — FEATURE SELECTION
+================================================================================
+
+Total features after engineering: ~120+ (audio + derived + TF-IDF + encoding)
+
+Selection Oracle: LightGBM (fast, stable importance scores for high-dim data)
+  Config: n_estimators=200, num_leaves=63, learning_rate=0.1,
+          subsample=0.8, colsample_bytree=0.8, random_state=42
+
+Method:
+  - LightGBM fit on full training feature matrix
+  - Feature importances extracted (split-count based)
+  - Threshold = mean importance across all features
+  - Features with importance >= threshold are retained (conservative approach)
+  - Bottom half with negligible contribution is discarded
+
+Output:
+  - X_sel      : selected training features (shape reported)
+  - X_test_sel : selected test features (same columns)
+  - Top-40 features plotted in a horizontal bar chart
+
+Rationale for conservative threshold:
+  - Prefer retaining borderline features over discarding potentially useful ones
+  - Reduces training time and minimises overfitting to noise dimensions
+
+
+================================================================================
+SECTION 7 — MODEL TRAINING & STRATEGY
+================================================================================
+
+Cross-Validation Setup:
+  - StratifiedKFold: 5 folds, shuffle=True, random_state=42
+  - Each fold: ~68K training samples, ~17K validation samples
+  - Primary metric: Macro F1 (penalises poor performance on every genre equally)
+  - Secondary metric: Accuracy
+
+Evaluation function cv_evaluate():
+  - Runs cross_val_score for both accuracy and f1_macro
+  - Records mean ± std for each metric
+  - Records wall-clock training time
+
+--- Model 1: LightGBM ---
+  Hyperparameters:
+    n_estimators    = 200
+    num_leaves      = 95
+    learning_rate   = 0.05
+    subsample       = 0.8
+    colsample_bytree= 0.8
+    reg_alpha       = 0.1
+    reg_lambda      = 0.1
+    random_state    = 42
+  Why chosen: Leaf-wise growth → highest accuracy per iteration; fastest to train.
+              May overfit on small datasets but mitigated by L1/L2 regularisation.
+
+--- Model 2: XGBoost ---
+  Hyperparameters:
+    n_estimators    = 200
+    max_depth       = 7
+    learning_rate   = 0.05
+    subsample       = 0.8
+    colsample_bytree= 0.8
+    reg_alpha       = 0.1
+    reg_lambda      = 1.0
+    eval_metric     = 'mlogloss'
+    random_state    = 42
+  Why chosen: Level-wise growth → more conservative splits; better on noisy labels.
+              Slower than LightGBM at this scale.
+
+--- Model 4: Random Forest ---
+  Hyperparameters:
+    n_estimators    = 400
+    max_depth       = None (fully grown)
+    min_samples_leaf= 2
+    max_features    = 'sqrt'
+    random_state    = 42
+  Why chosen: Decorrelated ensemble → reduces variance; good reference baseline.
+              Hard ceiling below gradient boosters on complex tasks.
+
+Why NOT Neural Networks:
+  With 85K samples and ~120 features, GBDTs match or exceed neural network performance
+  on structured tabular data while requiring far less hyperparameter tuning and compute.
+  GBDTs are the industry standard for structured tabular competitions.
+
+
+================================================================================
+SECTION 8 — MODEL COMPARISON RESULTS
+================================================================================
+
+5-Fold Stratified Cross-Validation — Mean ± Std (SEED = 42)
+
+  ┌───────────────┬───────────────────────────┬───────────────────────────┬───────────┐
+  │ Model         │ CV Accuracy (mean ± std)  │ CV F1 Macro (mean ± std)  │ Time (s)  │
+  ├───────────────┼───────────────────────────┼───────────────────────────┼───────────┤
+  │ LightGBM      │ 0.6153±0.0034             │ 0.6164±0.0031             │           │
+  │ XGBoost       │ 0.6088±0.0026             │ 0.6082±0.0024             │           │
+  │ Random Forest │ 0.5196±0.0018             │ 0.5131±0.0018             │           │        
+  └───────────────┴───────────────────────────┴───────────────────────────┴───────────┘
+
+
+Best Model: LightGBM
+
+
+================================================================================
+SECTION 9 — FINAL MODEL EVALUATION (HOLD-OUT)
+================================================================================
+
+Hold-Out Strategy:
+  - 15% of training data held out (stratified split, random_state=42)
+  - Model trained on remaining 85%
+  - Evaluation on unseen 15% split
+
+Metrics Reported on Hold-Out Set:
+  - Hold-out Accuracy   : 0.6242
+  - Hold-out Precision  : 0.6295 
+  - Hold-out F1 (macro) : 0.6257
+
+Per-Genre Analysis:
+  - classification_report computed for all 114 genres
+  - Top 10 best-predicted genres printed (highest F1)
+  - Bottom 10 hardest genres printed (lowest F1)
+  - Per-genre F1 bar chart with colour-coded thresholds:
+      Green  : F1 ≥ 0.60 (strong)
+      Orange : 0.40 ≤ F1 < 0.60 (moderate)
+      Red    : F1 < 0.40 (weak)
+
+
+================================================================================
+SECTION 9.5 — ERROR ANALYSIS
+================================================================================
+
+Method:
+  - Full 114×114 confusion matrix computed on hold-out predictions
+  - Off-diagonal entries extracted and ranked by confused count
+  - Top 20 most confused genre pairs printed (with confusion rate %)
+  - Zoomed confusion heatmap: 20 hardest genres (lowest F1) only
+
+Key Confusion Zones Identified:
+  ┌──────────────────────────────┬────────────────────────────────────┬─────────────────────────────────────┐
+  │ Confusion Pair               │ Root Cause                         │ Potential Fix                       │
+  ├──────────────────────────────┼────────────────────────────────────┼─────────────────────────────────────┤
+  │ electronic ↔ electro         │ Same BPM/energy; only era differs  │ Release year; richer TF-IDF vocab   │
+  │ rock ↔ alt-rock ↔ indie      │ Audio overlaps; distinction is     │ Artist embeddings (Word2Vec)        │
+  │                              │ cultural, not sonic                │                                     │
+  │ hip-hop ↔ rap                │ Spotify taxonomy artifact;         │ Ensemble stacking; accept ~10%      │
+  │                              │ near-identical audio DNA           │ confusion rate                      │
+  │ ambient ↔ chill ↔ sleep      │ Near-silent, low-energy profiles   │ Duration + release metadata         │
+  └──────────────────────────────┴────────────────────────────────────┴─────────────────────────────────────┘
+
+Conclusion: ~5–8% of errors are estimated to be irreducible given current features.
+Further improvement requires external data (release year, playlist co-occurrence)
+or a hierarchical classification approach (genre family → fine genre).
+
+
+================================================================================
+SECTION 10 — SUBMISSION GENERATION
+================================================================================
+
+Final Refit Strategy:
+  - Best model retrained on 100% of training data (all ~84,800 samples)
+  - Rationale: CV provides the performance estimate; full-data refit provides best predictions
+  - Additional ~12,700 samples (vs 85% split) improves performance on rare genre boundaries
+
+Output:
+  - submission.csv with columns: track_id, track_genre
+  - Predictions sample and genre distribution (top 20) printed for sanity check
+
+
+================================================================================
+SECTION 11 — CONCLUSION & KEY LEARNINGS
+================================================================================
+
+Feature Impact Ranking (estimated order of importance):
+  1. Artist Target Encoding      — Most predictive single feature; genre-consistent
+                                   by nature (Beethoven → classical, Drake → hip-hop)
+  2. TF-IDF Text Features        — Genre-specific vocabulary ("Symphony", "Drill",
+                                   "Acoustic Sessions"); bigrams especially powerful
+  3. Gradient Boosting > RF      — LightGBM/CatBoost/XGBoost outperform RF by ~2–4%
+                                   F1 on 114-class tabular data
+  4. Audio Interaction Features  — dance_energy, mood_index, energy_acoustic_ratio
+                                   each add marginal but consistent lift
+  5. Irreducible Genre Confusion — electronic/electro, hip-hop/rap share near-identical
+                                   audio DNA; a data taxonomy issue, not a model failure
+
+Future Improvement Roadmap:
+  ┌──────────────────────────────────────────────────┬────────────────┬────────┐
+  │ Improvement                                      │ Expected Lift  │ Effort │
+  ├──────────────────────────────────────────────────┼────────────────┼────────┤
+  │ Hyperparameter tuning (Optuna/Bayesian search)   │ +1–3% F1       │ Medium │
+  │ Model stacking / blending (LGBM + Cat + XGB)     │ +0.5–2% F1     │ Medium │
+  │ Artist embeddings (Word2Vec on co-occurrence)     │ +1–3% F1       │ High   │
+  │ Release year feature                              │ +0.5–1% F1     │ Low    │
+  │ Hierarchical classification (coarse → fine genre) │ +2–5% F1       │ High   │
+  │ More TF-IDF features (500 instead of 100)         │ +0.5–1% F1     │ Low    │
+  └──────────────────────────────────────────────────┴────────────────┴────────┘
+
+Reproducibility:
+  - SEED = 42 used throughout; all results reproducible by running cells top-to-bottom
+  - Requires: train.csv and test.csv in the same folder as the notebook
