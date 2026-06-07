@@ -205,8 +205,6 @@ Common failure cases included:
 ```text
 .
 ├── notebook.ipynb
-├── train.csv
-├── test.csv
 ├── submission.csv
-├── best_model.pkl
+├── report.txt
 └── README.md
